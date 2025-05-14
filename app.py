@@ -29,27 +29,21 @@ uploaded_file = st.file_uploader("Upload LFA Image", type=["jpg", "jpeg", "png"]
 
 # Find optimal exposure
 
-def find_optimal_exposure(image, strip_coords, orientation):
+def find_optimal_exposure(image, orientation):
     for boost in np.arange(0, 100.1, 0.1):
-        all_zero = True
-        for (x1, y1, x2, y2) in strip_coords:
-            strip = image[y1:y2, x1:x2]
-            gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
-            enhanced = 255 - cv2.convertScaleAbs(gray, beta=boost)
-            axis = 1 if orientation == "Vertical" else 0
-            profile = np.mean(enhanced, axis=axis)
-            profile = gaussian_filter1d(profile, 4)
-            peaks, _ = find_peaks(profile, distance=20, prominence=5)
-            mask = np.zeros_like(profile, dtype=bool)
-            if peaks.size:
-                results = peak_widths(profile, peaks, rel_height=1.0)
-                for i in range(len(peaks)):
-                    mask[int(results[2][i]):int(results[3][i])+1] = True
-            bg = np.median(profile[~mask]) if profile[~mask].size else 0
-            if bg > 0:
-                all_zero = False
-                break
-        if all_zero:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        enhanced = 255 - cv2.convertScaleAbs(gray, beta=boost)
+        axis = 1 if orientation == "Vertical" else 0
+        profile = np.mean(enhanced, axis=axis)
+        profile = gaussian_filter1d(profile, 4)
+        peaks, _ = find_peaks(profile, distance=20, prominence=5)
+        mask = np.zeros_like(profile, dtype=bool)
+        if peaks.size:
+            results = peak_widths(profile, peaks, rel_height=1.0)
+            for i in range(len(peaks)):
+                mask[int(results[2][i]):int(results[3][i])+1] = True
+        bg = np.median(profile[~mask]) if profile[~mask].size else 0
+        if bg <= 0:
             return round(boost, 1)
     return 10  # fallback
 
@@ -65,20 +59,14 @@ if uploaded_file:
                     for i in range(rows) for j in range(cols)]
 
     # Exposure handling
-    optimal_exposure = find_optimal_exposure(image, strip_coords, orientation)
-    if use_auto_exposure:
-        exposure_boost = optimal_exposure
-        st.info(f"Auto-set exposure boost to {exposure_boost} to zero all backgrounds.")
-    else:
-        exposure_boost = st.sidebar.slider("Exposure Boost", 0, 100, value=int(optimal_exposure), step=1)
-        st.warning(f"Manual override active at boost {exposure_boost}")
+    st.info("Auto-exposure will be set independently for each strip to achieve background = 0.")
 
     # Visual overlay images
     preview_img = image.copy()
     for (x1, y1, x2, y2) in strip_coords:
         cv2.rectangle(preview_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-    adj_img = 255 - cv2.convertScaleAbs(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY), beta=exposure_boost)
+    adj_img = 255 - cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     adj_img_color = cv2.cvtColor(adj_img, cv2.COLOR_GRAY2RGB)
     for (x1, y1, x2, y2) in strip_coords:
         cv2.rectangle(adj_img_color, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -93,8 +81,9 @@ if uploaded_file:
     summary, fig = [], go.Figure()
     for idx, (x1, y1, x2, y2) in enumerate(strip_coords):
         strip = image[y1:y2, x1:x2]
+        best_boost = find_optimal_exposure(strip, orientation)
         gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
-        enhanced = 255 - cv2.convertScaleAbs(gray, beta=exposure_boost)
+        enhanced = 255 - cv2.convertScaleAbs(gray, beta=best_boost)
         axis = 1 if orientation == "Vertical" else 0
         profile = np.mean(enhanced, axis=axis)
         profile = gaussian_filter1d(profile, 4)
@@ -110,8 +99,7 @@ if uploaded_file:
 
         test_peak = control_peak = test_pos = control_pos = None
         for peak in peaks:
-            label = "Control" if (orientation == "Vertical" and peak < len(profile)//2) or \
-                              (orientation == "Horizontal" and peak >= len(profile)//2) else "Test"
+            label = "Control" if (orientation == "Vertical" and peak < len(profile)//2) or (orientation == "Horizontal" and peak >= len(profile)//2) else "Test"
             strength = profile[peak] - bg
             if label == "Test":
                 test_peak, test_pos = strength, peak
@@ -120,6 +108,7 @@ if uploaded_file:
 
         summary.append({
             "Strip": idx+1,
+            "ExposureBoost": best_boost,
             "Background": round(bg, 2),
             "TLH": test_peak,
             "CLH": control_peak,
