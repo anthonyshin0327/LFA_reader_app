@@ -13,6 +13,7 @@ st.set_page_config(page_title="Improved LFA Background Subtraction", layout="wid
 st.title("Enhanced Multi-Strip LFA Analyzer")
 
 st.sidebar.header("Strip Grid Configuration")
+use_auto_exposure = st.sidebar.toggle("Use Auto Exposure", value=True)
 rows = st.sidebar.number_input("Number of Rows", min_value=1, value=3)
 cols = st.sidebar.number_input("Number of Columns", min_value=1, value=4)
 x_offset = st.sidebar.number_input("X Offset (px)", min_value=0, value=50)
@@ -23,7 +24,9 @@ x_spacing = st.sidebar.number_input("Horizontal Spacing (px)", min_value=0, valu
 y_spacing = st.sidebar.number_input("Vertical Spacing (px)", min_value=0, value=20)
 
 orientation = st.sidebar.selectbox("Read Orientation", ["Vertical", "Horizontal"])
-exposure_boost = st.sidebar.slider("Exposure Boost (0-100)", min_value=0, max_value=100, value=10)
+# Initialize placeholder for auto-calculated exposure
+exposure_placeholder = st.sidebar.empty()
+exposure_boost = 10  # temporary default before override
 
 
 def compute_intensity_profile(strip_img, orientation):
@@ -37,9 +40,62 @@ def compute_intensity_profile(strip_img, orientation):
 
 
 uploaded_file = st.file_uploader("Upload standardized LFA image", type=["jpg", "jpeg", "png"])
+
+# Automatically determine minimum exposure_boost for zero background across all strips
+def find_optimal_exposure(image, strip_coords, orientation):
+    for test_boost in np.arange(0, 100.1, 0.1):
+        all_zero = True
+        for (x1, y1, x2, y2) in strip_coords:
+            strip = image[y1:y2, x1:x2].copy()
+            gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
+            adjusted = cv2.convertScaleAbs(gray, alpha=1, beta=test_boost)
+            inv_gray = 255 - adjusted
+            axis = 1 if orientation == "Vertical" else 0
+            intensity = np.mean(inv_gray, axis=axis)
+            intensity = gaussian_filter1d(intensity, sigma=4)
+
+            peaks, _ = find_peaks(intensity, distance=20, prominence=5)
+            mask = np.zeros_like(intensity, dtype=bool)
+            results = peak_widths(intensity, peaks, rel_height=1.0)
+            for i, peak in enumerate(peaks):
+                left = int(np.floor(results[2][i]))
+                right = int(np.ceil(results[3][i]))
+                mask[left:right+1] = True
+            mask = binary_dilation(mask, iterations=2)
+            background_pixels = intensity[~mask]
+            bg = np.median(background_pixels) if background_pixels.size > 0 else 0
+            if bg > 0:
+                all_zero = False
+                break
+        if all_zero:
+            return round(test_boost, 1)
+    return None
+
 if uploaded_file:
+    # Auto or manual exposure logic
+    # Load and define image before auto exposure
     pil_image = Image.open(uploaded_file).convert("RGB")
     image = np.array(pil_image)
+    optimal_exposure = find_optimal_exposure(image, [(x_offset + j * (w + x_spacing), y_offset + i * (h + y_spacing), x_offset + j * (w + x_spacing) + w, y_offset + i * (h + y_spacing) + h) for i in range(rows) for j in range(cols)], orientation)
+    if use_auto_exposure and optimal_exposure is not None:
+        exposure_boost = optimal_exposure
+        st.session_state.auto_exposure = exposure_boost
+        st.info(f"Auto-set exposure boost to {exposure_boost} to achieve zero background across all strips.")
+    else:
+        exposure_boost = st.sidebar.slider("Exposure Boost (0-100)", min_value=0, max_value=100, value=int(st.session_state.get('exposure_slider', exposure_boost)), step=1, key="exposure_slider")
+        st.warning(f"Manual override active. Using exposure boost: {exposure_boost}")
+    pil_image = Image.open(uploaded_file).convert("RGB")
+    image = np.array(pil_image)
+
+    # Determine optimal exposure
+    optimal_exposure = find_optimal_exposure(image, [(x_offset + j * (w + x_spacing), y_offset + i * (h + y_spacing), x_offset + j * (w + x_spacing) + w, y_offset + i * (h + y_spacing) + h) for i in range(rows) for j in range(cols)], orientation)
+    if optimal_exposure is not None and 'exposure_slider' not in st.session_state:
+        exposure_boost = optimal_exposure
+        st.session_state.auto_exposure = exposure_boost
+        st.session_state.exposure_slider = int(exposure_boost)
+        st.info(f"Auto-set exposure boost to {exposure_boost} to achieve zero background across all strips.")
+    else:
+        exposure_boost = st.session_state.get('exposure_slider', exposure_boost)
     img_h, img_w = image.shape[:2]
 
     # Prepare overlay coordinates
@@ -83,7 +139,11 @@ if uploaded_file:
     fig2 = go.Figure()
     for idx, (x1, y1, x2, y2) in enumerate(strip_coords):
         strip = image[y1:y2, x1:x2].copy()
-        intensity = compute_intensity_profile(strip, orientation)
+        strip = cv2.convertScaleAbs(strip, alpha=1, beta=exposure_boost)
+        gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
+        inv_gray = 255 - gray
+        axis = 1 if orientation == "Vertical" else 0
+        intensity = np.mean(inv_gray, axis=axis)
         intensity = gaussian_filter1d(intensity, sigma=4)
 
         peaks, _ = find_peaks(intensity, distance=20, prominence=5)
