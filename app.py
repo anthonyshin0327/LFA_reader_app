@@ -1,4 +1,4 @@
-# Clean LFA Reader App: Final Clean Version with Per-Strip Auto Exposure
+# Clean LFA Reader App with Auto/Manual Exposure Toggle
 
 import streamlit as st
 import numpy as np
@@ -6,7 +6,7 @@ import cv2
 from PIL import Image
 import plotly.graph_objs as go
 from scipy.signal import find_peaks, peak_widths
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, binary_dilation
 import pandas as pd
 
 st.set_page_config(page_title="LFA Analyzer", layout="wide")
@@ -23,8 +23,10 @@ x_spacing = st.sidebar.number_input("Horizontal Spacing", 0, value=20)
 y_spacing = st.sidebar.number_input("Vertical Spacing", 0, value=20)
 orientation = st.sidebar.selectbox("Orientation", ["Vertical", "Horizontal"])
 
+# File uploader
 uploaded_file = st.file_uploader("Upload LFA Image", type=["jpg", "jpeg", "png"])
 
+# Find optimal exposure
 
 def find_optimal_exposure(image, orientation):
     for boost in np.arange(0, 100.1, 0.1):
@@ -44,17 +46,21 @@ def find_optimal_exposure(image, orientation):
             return round(boost, 1)
     return 10  # fallback
 
+# Main logic
 if uploaded_file:
     pil_img = Image.open(uploaded_file).convert("RGB")
     image = np.array(pil_img)
     img_h, img_w = image.shape[:2]
 
+    # Strip coordinates
     strip_coords = [(x_offset + j*(w + x_spacing), y_offset + i*(h + y_spacing),
                      x_offset + j*(w + x_spacing) + w, y_offset + i*(h + y_spacing) + h)
                     for i in range(rows) for j in range(cols)]
 
-    st.info("Auto-exposure is applied per strip to achieve zero background.")
+    # Exposure handling
+    st.info("Auto-exposure will be set independently for each strip to achieve background = 0.")
 
+    # Visual overlay images
     preview_img = image.copy()
     for (x1, y1, x2, y2) in strip_coords:
         cv2.rectangle(preview_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -70,13 +76,14 @@ if uploaded_file:
     with col2:
         st.image(adj_img_color, caption="Adjusted Image", use_container_width=True)
 
+    # Analysis
     summary, fig, thumbs = [], go.Figure(), []
-
     for idx, (x1, y1, x2, y2) in enumerate(strip_coords):
         strip = image[y1:y2, x1:x2]
         best_boost = find_optimal_exposure(strip, orientation)
         gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
         enhanced = 255 - cv2.convertScaleAbs(gray, beta=best_boost)
+        thumbs.append(Image.fromarray(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)))
 
         axis = 1 if orientation == "Vertical" else 0
         profile = np.mean(enhanced, axis=axis)
@@ -100,15 +107,6 @@ if uploaded_file:
             else:
                 control_peak, control_pos = strength, peak
 
-        annotated = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-        if test_pos is not None:
-            cv2.line(annotated, (test_pos, 0), (test_pos, annotated.shape[0]), (0, 255, 0), 2)
-            cv2.putText(annotated, 'T', (test_pos + 2, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        if control_pos is not None:
-            cv2.line(annotated, (control_pos, 0), (control_pos, annotated.shape[0]), (0, 0, 255), 2)
-            cv2.putText(annotated, 'C', (control_pos + 2, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        thumbs.append(Image.fromarray(annotated))
-
         summary.append({
             "Strip": idx+1,
             "ExposureBoost": best_boost,
@@ -129,7 +127,7 @@ if uploaded_file:
     st.subheader("Peak Summary Table")
     st.dataframe(df)
 
-    st.subheader("Strip Snapshots with Annotations")
+    st.subheader("Strip Snapshots with Auto Exposure")
     st.image(thumbs, width=150)
 
     st.download_button("Download CSV", df.to_csv(index=False).encode(), "summary.csv")
