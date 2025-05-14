@@ -1,197 +1,174 @@
-"""
-Streamlit LFA Analyzer (Auto‑Detected ROIs)
-==========================================
-A complete Streamlit application that analyses LFA images with automatic strip ROI
-segmentation.  Manual ROI mode is still available as a fallback.
+# Clean LFA Reader App: Final Clean Version with Per-Strip Auto Exposure
 
-Requirements
-------------
-* Streamlit
-* OpenCV‑Python
-* NumPy, SciPy, Pillow, Plotly, Pandas
-* roi_auto_detection.py (placed in the same folder or on Python path)
-
-Run with:
-    streamlit run lfa_analyzer_app.py
-"""
-
-import cv2
-import numpy as np
-import pandas as pd
-import plotly.graph_objs as go
 import streamlit as st
+import numpy as np
+import cv2
 from PIL import Image
-from scipy.ndimage import gaussian_filter1d
+import plotly.graph_objs as go
 from scipy.signal import find_peaks, peak_widths
-
-from roi_auto_detection import detect_strip_rois, draw_rois
-
-# --------------------------- Streamlit UI ------------------------------------
+from scipy.ndimage import gaussian_filter1d
+import pandas as pd
 
 st.set_page_config(page_title="LFA Analyzer", layout="wide")
-st.title("📈 LFA Analyzer with Auto‑Detected ROIs")
+st.title("LFA Analyzer with Per-Strip Auto Exposure")
 
-with st.sidebar:
-    st.header("Configuration")
+st.sidebar.header("Configuration")
+rows = st.sidebar.number_input("Rows", 1, value=3)
+cols = st.sidebar.number_input("Columns", 1, value=4)
+x_offset = st.sidebar.number_input("X Offset", 0, value=50)
+y_offset = st.sidebar.number_input("Y Offset", 0, value=50)
+w = st.sidebar.number_input("Strip Width", 10, value=100)
+h = st.sidebar.number_input("Strip Height", 10, value=300)
+x_spacing = st.sidebar.number_input("Horizontal Spacing", 0, value=20)
+y_spacing = st.sidebar.number_input("Vertical Spacing", 0, value=20)
+orientation = st.sidebar.selectbox("Orientation", ["Vertical", "Horizontal"])
 
-    mode = st.radio("ROI Mode", ["Auto", "Manual"], horizontal=True)
-
-    # Common parameters
-    rows = st.number_input("Rows", 1, value=3, step=1)
-    cols = st.number_input("Columns", 1, value=4, step=1)
-    orientation = st.selectbox("Orientation", ["Vertical", "Horizontal"], index=0)
-
-    if mode == "Manual":
-        st.markdown("---")
-        st.subheader("Manual ROI Parameters")
-        x_offset = st.number_input("X Offset", 0, value=50)
-        y_offset = st.number_input("Y Offset", 0, value=50)
-        w = st.number_input("Strip Width", 10, value=100)
-        h = st.number_input("Strip Height", 10, value=300)
-        x_spacing = st.number_input("Horizontal Spacing", 0, value=20)
-        y_spacing = st.number_input("Vertical Spacing", 0, value=20)
-    else:  # Auto parameters
-        st.markdown("---")
-        st.subheader("Auto‑Detection Parameters")
-        pad = st.slider("Padding around edges (px)", 0, 20, value=5)
-        prominence = st.slider("Edge prominence", 1.0, 15.0, value=5.0)
-
-# File uploader
 uploaded_file = st.file_uploader("Upload LFA Image", type=["jpg", "jpeg", "png"])
 
-# ----------------------- Exposure helper -------------------------------------
 
-def find_optimal_exposure(strip: np.ndarray, orientation: str) -> float:
-    """Return brightness boost (beta) that drives background to ~0 for a strip."""
-    for boost in np.arange(0, 100.1, 0.5):
-        gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
+def find_optimal_exposure(image, orientation):
+    for boost in np.arange(0, 100.1, 0.1):
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         enhanced = 255 - cv2.convertScaleAbs(gray, beta=boost)
         axis = 1 if orientation == "Vertical" else 0
-        profile = gaussian_filter1d(np.mean(enhanced, axis=axis), 4)
+        profile = np.mean(enhanced, axis=axis)
+        profile = gaussian_filter1d(profile, 4)
         peaks, _ = find_peaks(profile, distance=20, prominence=5)
         mask = np.zeros_like(profile, dtype=bool)
         if peaks.size:
             results = peak_widths(profile, peaks, rel_height=1.0)
             for i in range(len(peaks)):
-                mask[int(results[2][i]): int(results[3][i]) + 1] = True
+                mask[int(results[2][i]):int(results[3][i])+1] = True
         bg = np.median(profile[~mask]) if profile[~mask].size else 0
         if bg <= 0:
             return round(boost, 1)
-    return 10.0  # fallback
-
-# --------------------------- Main logic --------------------------------------
+    return 10  # fallback
 
 if uploaded_file:
     pil_img = Image.open(uploaded_file).convert("RGB")
     image = np.array(pil_img)
     img_h, img_w = image.shape[:2]
 
-    # ----------------- ROI calculation ------------------
-    if mode == "Manual":
-        strip_coords = [
-            (
-                x_offset + j * (w + x_spacing),
-                y_offset + i * (h + y_spacing),
-                x_offset + j * (w + x_spacing) + w,
-                y_offset + i * (h + y_spacing) + h,
-            )
-            for i in range(rows)
-            for j in range(cols)
-        ]
-    else:
-        try:
-            strip_coords = detect_strip_rois(
-                image, rows, cols, orientation=orientation, pad=pad, prominence=prominence
-            )
-        except RuntimeError as e:
-            st.error(f"ROI auto‑detection failed: {e}")
-            st.stop()
+    strip_coords = [(x_offset + j*(w + x_spacing), y_offset + i*(h + y_spacing),
+                     x_offset + j*(w + x_spacing) + w, y_offset + i*(h + y_spacing) + h)
+                    for i in range(rows) for j in range(cols)]
 
-    # ----------------- Visual overlay -------------------
-    preview_img = draw_rois(image, strip_coords)
+    st.info("Auto-exposure is applied per strip to achieve zero background.")
+
+    preview_img = image.copy()
+    for (x1, y1, x2, y2) in strip_coords:
+        cv2.rectangle(preview_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    adj_img = 255 - cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    adj_img_color = cv2.cvtColor(adj_img, cv2.COLOR_GRAY2RGB)
+    for (x1, y1, x2, y2) in strip_coords:
+        cv2.rectangle(adj_img_color, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
     col1, col2 = st.columns(2)
     with col1:
-        st.image(preview_img, caption="Original + ROIs", use_container_width=True)
+        st.image(preview_img, caption="Original + ROI", use_container_width=True)
     with col2:
-        gray = 255 - cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        st.image(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB), caption="Inverted Gray", use_container_width=True)
-
-    # ----------------- Analysis per strip ---------------
-    st.info("Auto‑exposure applied independently per detected strip.")
+        st.image(adj_img_color, caption="Adjusted Image", use_container_width=True)
 
     summary, fig, thumbs = [], go.Figure(), []
 
     for idx, (x1, y1, x2, y2) in enumerate(strip_coords):
         strip = image[y1:y2, x1:x2]
         best_boost = find_optimal_exposure(strip, orientation)
-        gray_s = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
-        enhanced = 255 - cv2.convertScaleAbs(gray_s, beta=best_boost)
-        thumbs.append(Image.fromarray(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)))
+        gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
+        enhanced = 255 - cv2.convertScaleAbs(gray, beta=best_boost)
 
         axis = 1 if orientation == "Vertical" else 0
-        profile = gaussian_filter1d(np.mean(enhanced, axis=axis), 4)
+        profile = np.mean(enhanced, axis=axis)
+        profile = gaussian_filter1d(profile, 4)
 
         peaks, _ = find_peaks(profile, distance=20, prominence=5)
         mask = np.zeros_like(profile, dtype=bool)
         if peaks.size:
             results = peak_widths(profile, peaks, rel_height=1.0)
             for i in range(len(peaks)):
-                mask[int(results[2][i]): int(results[3][i]) + 1] = True
+                mask[int(results[2][i]):int(results[3][i])+1] = True
         bg = np.median(profile[~mask]) if profile[~mask].size else 0
         bgsub = profile - bg
 
         test_peak = control_peak = test_pos = control_pos = None
         for peak in peaks:
-            label = (
-                "Control"
-                if (
-                    (orientation == "Vertical" and peak < len(profile) // 2)
-                    or (orientation == "Horizontal" and peak >= len(profile) // 2)
-                )
-                else "Test"
-            )
+            label = "Control" if (orientation == "Vertical" and peak < len(profile)//2) or (orientation == "Horizontal" and peak >= len(profile)//2) else "Test"
             strength = profile[peak] - bg
             if label == "Test":
                 test_peak, test_pos = strength, peak
             else:
                 control_peak, control_pos = strength, peak
 
-        summary.append(
-            {
-                "Strip": idx + 1,
-                "ExposureBoost": best_boost,
-                "Background": round(float(bg), 2),
-                "TLH": test_peak,
-                "CLH": control_peak,
-                "T_location": test_pos,
-                "C_location": control_pos,
-            }
-        )
+        # Use clean grayscale image for annotation alignment only
+        thumbs.append(Image.fromarray(enhanced))
 
-        fig.add_trace(
-            go.Scatter3d(
-                x=list(range(len(bgsub))),
-                y=[idx] * len(bgsub),
-                z=bgsub,
-                mode="lines",
-                name=f"Strip {idx + 1}",
-            )
-        )
+        summary.append({
+            "Strip": idx+1,
+            "ExposureBoost": best_boost,
+            "Background": round(bg, 2),
+            "TLH": test_peak,
+            "CLH": control_peak,
+            "T_location": test_pos,
+            "C_location": control_pos
+        })
+
+        fig.add_trace(go.Scatter3d(x=list(range(len(bgsub))),
+                                   y=[idx]*len(bgsub),
+                                   z=bgsub,
+                                   mode='lines',
+                                   name=f"Strip {idx+1}"))
 
     df = pd.DataFrame(summary)
-
     st.subheader("Peak Summary Table")
     st.dataframe(df)
 
-    st.subheader("Strip Snapshots (Auto Exposure)")
-    st.image(thumbs, width=150)
+    st.subheader("Strip Snapshots with Annotations")
+    from PIL import ImageDraw
 
-    csv = df.to_csv(index=False).encode()
-    st.download_button("Download CSV", csv, "summary.csv", mime="text/csv")
+# Align strips so that Test and Control lines align in the collage
+aligned_thumbs = []
+ref_T = max([entry["T_location"] for entry in summary if entry["T_location"] is not None] or [0])
+ref_C = max([entry["C_location"] for entry in summary if entry["C_location"] is not None] or [0])
 
-    fig.update_layout(
-        scene=dict(xaxis_title="Pixel", yaxis_title="Strip", zaxis_title="Intensity"),
-        height=600,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+for idx, row in enumerate(summary):
+    img = thumbs[idx]
+    width, height = img.size
+    shift = 0
+    strip_T = row["T_location"]
+    strip_C = row["C_location"]
+
+    if strip_T is not None and strip_C is not None:
+        shift_T = ref_T - strip_T
+        shift_C = ref_C - strip_C
+        shift = int(round((shift_T + shift_C) / 2))
+    elif strip_T is not None:
+        shift = ref_T - strip_T
+    elif strip_C is not None:
+        shift = ref_C - strip_C
+
+    canvas_w = width
+    shift_left = max(0, shift)
+    shift_right = max(0, -shift)
+    crop_left = shift_right
+    crop_right = width - shift_left
+    if crop_right <= crop_left:
+        cropped = img  # fallback to full image if shift is too extreme
+    else:
+        cropped = img.crop((crop_left, 0, crop_right, height))
+    canvas = Image.new("RGB", (canvas_w, height), (255, 255, 255))
+    canvas.paste(cropped, (shift_left, 0))
+    aligned_thumbs.append(canvas)
+
+# Add label reference image
+label_img = Image.new("RGB", (50, height), (255, 255, 255))
+draw = ImageDraw.Draw(label_img)
+draw.text((5, ref_T - 7), "T", fill=(0, 128, 0))
+draw.text((5, ref_C - 7), "C", fill=(255, 0, 0))
+
+collage_images = [label_img] + aligned_thumbs
+
+st.image(collage_images, width=60)
+st.download_button("Download CSV", df.to_csv(index=False).encode(), "summary.csv")
+fig.update_layout(scene=dict(xaxis_title="Pixel", yaxis_title="Strip", zaxis_title="Intensity"))
+st.plotly_chart(fig)
