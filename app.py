@@ -4,19 +4,16 @@ Streamlit LFA Analyzer (Auto‑Detected ROIs)
 A complete Streamlit application that analyses LFA images with automatic strip ROI
 segmentation.  Manual ROI mode is still available as a fallback.
 
-This version self‑loads **roi_auto_detection.py** dynamically if it’s sitting in the
-same folder, so you don’t need to `pip install` anything—just make sure the file
-is present next to this script.
+Requirements
+------------
+* Streamlit
+* OpenCV‑Python
+* NumPy, SciPy, Pillow, Plotly, Pandas
+* roi_auto_detection.py (placed in the same folder or on Python path)
 
 Run with:
     streamlit run lfa_analyzer_app.py
 """
-
-import importlib
-import importlib.util
-import pathlib
-import sys
-from types import ModuleType
 
 import cv2
 import numpy as np
@@ -27,36 +24,7 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, peak_widths
 
-# -----------------------------------------------------------------------------
-# Dynamic import of roi_auto_detection -----------------------------------------
-# -----------------------------------------------------------------------------
-
-def _load_roi_module() -> ModuleType:
-    """Try regular import first; if that fails look for roi_auto_detection.py in the
-    current file’s directory and load it directly."""
-    module_name = "roi_auto_detection"
-    try:
-        return importlib.import_module(module_name)
-    except ModuleNotFoundError:
-        # Look for a sibling file in the same directory as this script
-        mod_path = pathlib.Path(__file__).with_name("roi_auto_detection.py")
-        if not mod_path.exists():
-            st.error(
-                "❌ **roi_auto_detection.py** not found. Place it in the same directory "
-                "as *lfa_analyzer_app.py* or install it as a module."
-            )
-            raise
-        spec = importlib.util.spec_from_file_location(module_name, mod_path)
-        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-        assert spec.loader is not None
-        spec.loader.exec_module(module)  # type: ignore[arg-type]
-        sys.modules[module_name] = module
-        return module
-
-_roi_mod = _load_roi_module()
-
-detect_strip_rois = _roi_mod.detect_strip_rois  # type: ignore[attr-defined]
-draw_rois = _roi_mod.draw_rois  # type: ignore[attr-defined]
+from roi_auto_detection import detect_strip_rois, draw_rois
 
 # --------------------------- Streamlit UI ------------------------------------
 
@@ -105,7 +73,7 @@ def find_optimal_exposure(strip: np.ndarray, orientation: str) -> float:
         if peaks.size:
             results = peak_widths(profile, peaks, rel_height=1.0)
             for i in range(len(peaks)):
-                mask[int(results[2][i]) : int(results[3][i]) + 1] = True
+                mask[int(results[2][i]): int(results[3][i]) + 1] = True
         bg = np.median(profile[~mask]) if profile[~mask].size else 0
         if bg <= 0:
             return round(boost, 1)
@@ -116,6 +84,7 @@ def find_optimal_exposure(strip: np.ndarray, orientation: str) -> float:
 if uploaded_file:
     pil_img = Image.open(uploaded_file).convert("RGB")
     image = np.array(pil_img)
+    img_h, img_w = image.shape[:2]
 
     # ----------------- ROI calculation ------------------
     if mode == "Manual":
@@ -168,7 +137,7 @@ if uploaded_file:
         if peaks.size:
             results = peak_widths(profile, peaks, rel_height=1.0)
             for i in range(len(peaks)):
-                mask[int(results[2][i]) : int(results[3][i]) + 1] = True
+                mask[int(results[2][i]): int(results[3][i]) + 1] = True
         bg = np.median(profile[~mask]) if profile[~mask].size else 0
         bgsub = profile - bg
 
