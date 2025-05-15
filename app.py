@@ -87,7 +87,7 @@ if uploaded_file:
 
     # Global 3D-validated peak detection pass
     for idx, profile in enumerate(all_profiles):
-        peaks, _ = find_peaks(profile, distance=20, prominence=0.01)
+        peaks, _ = find_peaks(profile, distance=80, prominence=0.000001)
         mask = np.zeros_like(profile, dtype=bool)
         if peaks.size:
             results = peak_widths(profile, peaks, rel_height=1.0)
