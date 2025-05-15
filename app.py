@@ -1,9 +1,9 @@
-# Clean LFA Reader App: Final Clean Version with Per-Strip Auto Exposure
+# Clean LFA Reader App: Final Clean Version with Per-Strip Auto Exposure (Enhanced Zero Background)
 
 import streamlit as st
 import numpy as np
 import cv2
-from PIL import Image
+from PIL import Image, ImageDraw
 import plotly.graph_objs as go
 from scipy.signal import find_peaks, peak_widths
 from scipy.ndimage import gaussian_filter1d
@@ -25,24 +25,25 @@ orientation = st.sidebar.selectbox("Orientation", ["Vertical", "Horizontal"])
 
 uploaded_file = st.file_uploader("Upload LFA Image", type=["jpg", "jpeg", "png"])
 
-
 def find_optimal_exposure(image, orientation):
-    for boost in np.arange(0, 100.1, 0.1):
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        enhanced = 255 - cv2.convertScaleAbs(gray, beta=boost)
-        axis = 1 if orientation == "Vertical" else 0
-        profile = np.mean(enhanced, axis=axis)
-        profile = gaussian_filter1d(profile, 4)
-        peaks, _ = find_peaks(profile, distance=20, prominence=5)
-        mask = np.zeros_like(profile, dtype=bool)
-        if peaks.size:
-            results = peak_widths(profile, peaks, rel_height=1.0)
-            for i in range(len(peaks)):
-                mask[int(results[2][i]):int(results[3][i])+1] = True
-        bg = np.median(profile[~mask]) if profile[~mask].size else 0
-        if bg <= 0:
-            return round(boost, 1)
-    return 10  # fallback
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    for alpha in np.arange(1.0, 3.5, 0.1):
+        for beta in np.arange(-50, 51, 5):
+            enhanced = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
+            inverted = 255 - enhanced
+            axis = 1 if orientation == "Vertical" else 0
+            profile = np.mean(inverted, axis=axis)
+            profile = gaussian_filter1d(profile, 4)
+            peaks, _ = find_peaks(profile, distance=20, prominence=5)
+            mask = np.zeros_like(profile, dtype=bool)
+            if peaks.size:
+                results = peak_widths(profile, peaks, rel_height=1.0)
+                for i in range(len(peaks)):
+                    mask[int(results[2][i]):int(results[3][i])+1] = True
+            bg = np.median(profile[~mask]) if profile[~mask].size else 0
+            if bg <= 0:
+                return round(alpha, 2), beta
+    return 1.0, 0  # fallback
 
 if uploaded_file:
     pil_img = Image.open(uploaded_file).convert("RGB")
@@ -74,9 +75,10 @@ if uploaded_file:
 
     for idx, (x1, y1, x2, y2) in enumerate(strip_coords):
         strip = image[y1:y2, x1:x2]
-        best_boost = find_optimal_exposure(strip, orientation)
+        best_alpha, best_beta = find_optimal_exposure(strip, orientation)
+
         gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
-        enhanced = 255 - cv2.convertScaleAbs(gray, beta=best_boost)
+        enhanced = 255 - cv2.convertScaleAbs(gray, alpha=best_alpha, beta=best_beta)
 
         axis = 1 if orientation == "Vertical" else 0
         profile = np.mean(enhanced, axis=axis)
@@ -100,17 +102,24 @@ if uploaded_file:
             else:
                 control_peak, control_pos = strength, peak
 
-        # Use clean grayscale image for annotation alignment only
         thumbs.append(Image.fromarray(enhanced))
 
+        total = (test_peak or 0) + (control_peak or 0)
         summary.append({
             "Strip": idx+1,
-            "ExposureBoost": best_boost,
+            "ContrastAlpha": best_alpha,
+            "BrightnessBeta": best_beta,
             "Background": round(bg, 2),
             "TLH": test_peak,
             "CLH": control_peak,
             "T_location": test_pos,
-            "C_location": control_pos
+            "C_location": control_pos,
+            "Norm_TLH": test_peak/total if total else None,
+            "Norm_CLH": control_peak/total if total else None,
+            "CLH/TLH": control_peak/test_peak if test_peak else None,
+            "TLH/CLH": test_peak/control_peak if control_peak else None,
+            "TLH-CLH": (test_peak - control_peak) if test_peak is not None and control_peak is not None else None,
+            "Norm_TLH-CLH": ((test_peak - control_peak)/total) if total else None
         })
 
         fig.add_trace(go.Scatter3d(x=list(range(len(bgsub))),
@@ -124,51 +133,48 @@ if uploaded_file:
     st.dataframe(df)
 
     st.subheader("Strip Snapshots with Annotations")
-    from PIL import ImageDraw
 
-# Align strips so that Test and Control lines align in the collage
-aligned_thumbs = []
-ref_T = max([entry["T_location"] for entry in summary if entry["T_location"] is not None] or [0])
-ref_C = max([entry["C_location"] for entry in summary if entry["C_location"] is not None] or [0])
+    aligned_thumbs = []
+    ref_T = max([entry["T_location"] for entry in summary if entry["T_location"] is not None] or [0])
+    ref_C = max([entry["C_location"] for entry in summary if entry["C_location"] is not None] or [0])
 
-for idx, row in enumerate(summary):
-    img = thumbs[idx]
-    width, height = img.size
-    shift = 0
-    strip_T = row["T_location"]
-    strip_C = row["C_location"]
+    for idx, row in enumerate(summary):
+        img = thumbs[idx]
+        width, height = img.size
+        shift = 0
+        strip_T = row["T_location"]
+        strip_C = row["C_location"]
 
-    if strip_T is not None and strip_C is not None:
-        shift_T = ref_T - strip_T
-        shift_C = ref_C - strip_C
-        shift = int(round((shift_T + shift_C) / 2))
-    elif strip_T is not None:
-        shift = ref_T - strip_T
-    elif strip_C is not None:
-        shift = ref_C - strip_C
+        if strip_T is not None and strip_C is not None:
+            shift_T = ref_T - strip_T
+            shift_C = ref_C - strip_C
+            shift = int(round((shift_T + shift_C) / 2))
+        elif strip_T is not None:
+            shift = ref_T - strip_T
+        elif strip_C is not None:
+            shift = ref_C - strip_C
 
-    canvas_w = width
-    shift_left = max(0, shift)
-    shift_right = max(0, -shift)
-    crop_left = shift_right
-    crop_right = width - shift_left
-    if crop_right <= crop_left:
-        cropped = img  # fallback to full image if shift is too extreme
-    else:
-        cropped = img.crop((crop_left, 0, crop_right, height))
-    canvas = Image.new("RGB", (canvas_w, height), (255, 255, 255))
-    canvas.paste(cropped, (shift_left, 0))
-    aligned_thumbs.append(canvas)
+        canvas_w = width
+        shift_left = max(0, shift)
+        shift_right = max(0, -shift)
+        crop_left = shift_right
+        crop_right = width - shift_left
+        if crop_right <= crop_left:
+            cropped = img
+        else:
+            cropped = img.crop((crop_left, 0, crop_right, height))
+        canvas = Image.new("RGB", (canvas_w, height), (255, 255, 255))
+        canvas.paste(cropped, (shift_left, 0))
+        aligned_thumbs.append(canvas)
 
-# Add label reference image
-label_img = Image.new("RGB", (50, height), (255, 255, 255))
-draw = ImageDraw.Draw(label_img)
-draw.text((5, ref_T - 7), "T", fill=(0, 128, 0))
-draw.text((5, ref_C - 7), "C", fill=(255, 0, 0))
+    label_img = Image.new("RGB", (50, height), (255, 255, 255))
+    #draw = ImageDraw.Draw(label_img)
+    #draw.text((5, ref_T - 7), "T", fill=(0, 128, 0))
+    #draw.text((5, ref_C - 7), "C", fill=(255, 0, 0))
 
-collage_images = [label_img] + aligned_thumbs
+    collage_images = [label_img] + aligned_thumbs
 
-st.image(collage_images, width=60)
-st.download_button("Download CSV", df.to_csv(index=False).encode(), "summary.csv")
-fig.update_layout(scene=dict(xaxis_title="Pixel", yaxis_title="Strip", zaxis_title="Intensity"))
-st.plotly_chart(fig)
+    st.image(collage_images, width=60)
+    st.download_button("Download CSV", df.to_csv(index=False).encode(), "summary.csv")
+    fig.update_layout(scene=dict(xaxis_title="Pixel", yaxis_title="Strip", zaxis_title="Intensity"))
+    st.plotly_chart(fig)
