@@ -71,7 +71,7 @@ if uploaded_file:
     with col2:
         st.image(adj_img_color, caption="Adjusted Image", use_container_width=True)
 
-    summary, fig, thumbs = [], go.Figure(), []
+    summary, fig, thumbs, all_profiles = [], go.Figure(), [], []
 
     for idx, (x1, y1, x2, y2) in enumerate(strip_coords):
         strip = image[y1:y2, x1:x2]
@@ -83,8 +83,11 @@ if uploaded_file:
         axis = 1 if orientation == "Vertical" else 0
         profile = np.mean(enhanced, axis=axis)
         profile = gaussian_filter1d(profile, 4)
+        all_profiles.append(profile)
 
-        peaks, _ = find_peaks(profile, distance=20, prominence=5)
+    # Global 3D-validated peak detection pass
+    for idx, profile in enumerate(all_profiles):
+        peaks, _ = find_peaks(profile, distance=20, prominence=0.01)
         mask = np.zeros_like(profile, dtype=bool)
         if peaks.size:
             results = peak_widths(profile, peaks, rel_height=1.0)
@@ -93,26 +96,19 @@ if uploaded_file:
         bg = np.median(profile[~mask]) if profile[~mask].size else 0
         bgsub = profile - bg
 
-        thumbs.append(Image.fromarray(enhanced))
-
-        test_peak = control_peak = test_pos = control_pos = None
-        if peaks.size:
-            sorted_peaks = sorted(peaks)
-            if len(sorted_peaks) >= 2:
-                # Assign first to control, last to test
-                control_pos = sorted_peaks[0]
-                test_pos = sorted_peaks[-1]
+        control_peak = test_peak = control_pos = test_pos = None
+        if peaks.size >= 2:
+            control_pos = peaks[0]
+            test_pos = peaks[-1]
+            control_peak = profile[control_pos] - bg
+            test_peak = profile[test_pos] - bg
+        elif peaks.size == 1:
+            if peaks[0] < len(profile) / 2:
+                control_pos = peaks[0]
                 control_peak = profile[control_pos] - bg
-                test_peak = profile[test_pos] - bg
             else:
-                # Only one peak detected — decide based on location
-                lone_peak = sorted_peaks[0]
-                if lone_peak < len(profile) / 2:
-                    control_pos = lone_peak
-                    control_peak = profile[control_pos] - bg
-                else:
-                    test_pos = lone_peak
-                    test_peak = profile[test_pos] - bg
+                test_pos = peaks[0]
+                test_peak = profile[test_pos] - bg
 
         total = (test_peak or 0) + (control_peak or 0)
         norm_tlh = test_peak / total if test_peak is not None and total else None
@@ -124,8 +120,6 @@ if uploaded_file:
 
         summary.append({
             "Strip": idx+1,
-            "ContrastAlpha": best_alpha,
-            "BrightnessBeta": best_beta,
             "Background": round(bg, 2),
             "TLH": test_peak,
             "CLH": control_peak,
@@ -146,48 +140,9 @@ if uploaded_file:
                                    name=f"Strip {idx+1}"))
 
     df = pd.DataFrame(summary)
-    st.subheader("Peak Summary Table")
+    st.subheader("Peak Summary Table (from 3D profile)")
     st.dataframe(df)
 
-    st.subheader("Strip Snapshots with Annotations")
-
-    aligned_thumbs = []
-    ref_T = max([entry["T_location"] for entry in summary if entry["T_location"] is not None] or [0])
-    ref_C = max([entry["C_location"] for entry in summary if entry["C_location"] is not None] or [0])
-
-    for idx, row in enumerate(summary):
-        img = thumbs[idx]
-        width, height = img.size
-        shift = 0
-        strip_T = row["T_location"]
-        strip_C = row["C_location"]
-
-        if strip_T is not None and strip_C is not None:
-            shift_T = ref_T - strip_T
-            shift_C = ref_C - strip_C
-            shift = int(round((shift_T + shift_C) / 2))
-        elif strip_T is not None:
-            shift = ref_T - strip_T
-        elif strip_C is not None:
-            shift = ref_C - strip_C
-
-        canvas_w = width
-        shift_left = max(0, shift)
-        shift_right = max(0, -shift)
-        crop_left = shift_right
-        crop_right = width - shift_left
-        if crop_right <= crop_left:
-            cropped = img
-        else:
-            cropped = img.crop((crop_left, 0, crop_right, height))
-        canvas = Image.new("RGB", (canvas_w, height), (255, 255, 255))
-        canvas.paste(cropped, (shift_left, 0))
-        aligned_thumbs.append(canvas)
-
-    label_img = Image.new("RGB", (50, height), (255, 255, 255))
-    collage_images = [label_img] + aligned_thumbs
-
-    st.image(collage_images, width=60)
     st.download_button("Download CSV", df.to_csv(index=False).encode(), "summary.csv")
     fig.update_layout(scene=dict(xaxis_title="Pixel", yaxis_title="Strip", zaxis_title="Intensity"))
     st.plotly_chart(fig)
