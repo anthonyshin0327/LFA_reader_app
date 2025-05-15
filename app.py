@@ -27,8 +27,8 @@ uploaded_file = st.file_uploader("Upload LFA Image", type=["jpg", "jpeg", "png"]
 
 def find_optimal_exposure(image, orientation):
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    for alpha in np.arange(1.0, 3.5, 0.1):
-        for beta in np.arange(-50, 51, 5):
+    for alpha in np.arange(0.1, 4.0, 0.1):
+        for beta in np.arange(-50.0, 50.0, 1):
             enhanced = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
             inverted = 255 - enhanced
             axis = 1 if orientation == "Vertical" else 0
@@ -43,7 +43,7 @@ def find_optimal_exposure(image, orientation):
             bg = np.median(profile[~mask]) if profile[~mask].size else 0
             if bg <= 0:
                 return round(alpha, 2), beta
-    return 1.0, 0  # fallback
+    return 1.0, 0
 
 if uploaded_file:
     pil_img = Image.open(uploaded_file).convert("RGB")
@@ -93,18 +93,35 @@ if uploaded_file:
         bg = np.median(profile[~mask]) if profile[~mask].size else 0
         bgsub = profile - bg
 
-        test_peak = control_peak = test_pos = control_pos = None
-        for peak in peaks:
-            label = "Control" if (orientation == "Vertical" and peak < len(profile)//2) or (orientation == "Horizontal" and peak >= len(profile)//2) else "Test"
-            strength = profile[peak] - bg
-            if label == "Test":
-                test_peak, test_pos = strength, peak
-            else:
-                control_peak, control_pos = strength, peak
-
         thumbs.append(Image.fromarray(enhanced))
 
+        test_peak = control_peak = test_pos = control_pos = None
+        if peaks.size:
+            sorted_peaks = sorted(peaks)
+            if len(sorted_peaks) >= 2:
+                # Assign first to control, last to test
+                control_pos = sorted_peaks[0]
+                test_pos = sorted_peaks[-1]
+                control_peak = profile[control_pos] - bg
+                test_peak = profile[test_pos] - bg
+            else:
+                # Only one peak detected — decide based on location
+                lone_peak = sorted_peaks[0]
+                if lone_peak < len(profile) / 2:
+                    control_pos = lone_peak
+                    control_peak = profile[control_pos] - bg
+                else:
+                    test_pos = lone_peak
+                    test_peak = profile[test_pos] - bg
+
         total = (test_peak or 0) + (control_peak or 0)
+        norm_tlh = test_peak / total if test_peak is not None and total else None
+        norm_clh = control_peak / total if control_peak is not None and total else None
+        clh_div_tlh = control_peak / test_peak if test_peak not in [None, 0] and control_peak is not None else None
+        tlh_div_clh = test_peak / control_peak if control_peak not in [None, 0] and test_peak is not None else None
+        tlh_minus_clh = (test_peak - control_peak) if test_peak is not None and control_peak is not None else None
+        norm_diff = ((test_peak - control_peak) / total) if None not in (test_peak, control_peak) and total else None
+
         summary.append({
             "Strip": idx+1,
             "ContrastAlpha": best_alpha,
@@ -114,12 +131,12 @@ if uploaded_file:
             "CLH": control_peak,
             "T_location": test_pos,
             "C_location": control_pos,
-            "Norm_TLH": test_peak/total if total else None,
-            "Norm_CLH": control_peak/total if total else None,
-            "CLH/TLH": control_peak/test_peak if test_peak else None,
-            "TLH/CLH": test_peak/control_peak if control_peak else None,
-            "TLH-CLH": (test_peak - control_peak) if test_peak is not None and control_peak is not None else None,
-            "Norm_TLH-CLH": ((test_peak - control_peak)/total) if total else None
+            "Norm_TLH": norm_tlh,
+            "Norm_CLH": norm_clh,
+            "CLH/TLH": clh_div_tlh,
+            "TLH/CLH": tlh_div_clh,
+            "TLH-CLH": tlh_minus_clh,
+            "Norm_TLH-CLH": norm_diff
         })
 
         fig.add_trace(go.Scatter3d(x=list(range(len(bgsub))),
@@ -168,10 +185,6 @@ if uploaded_file:
         aligned_thumbs.append(canvas)
 
     label_img = Image.new("RGB", (50, height), (255, 255, 255))
-    #draw = ImageDraw.Draw(label_img)
-    #draw.text((5, ref_T - 7), "T", fill=(0, 128, 0))
-    #draw.text((5, ref_C - 7), "C", fill=(255, 0, 0))
-
     collage_images = [label_img] + aligned_thumbs
 
     st.image(collage_images, width=60)
